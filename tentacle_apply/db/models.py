@@ -55,6 +55,46 @@ class Profile(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class Preferences(SQLModel, table=True):
+    """User-stated job-search intent (distinct from the resume-derived Profile).
+
+    Profile = what the candidate has done; Preferences = what they want. Discovery filters and
+    ranks against these, falling back to Profile-derived values when a field is left empty.
+    """
+
+    __tablename__ = "preferences"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True, unique=True)
+    work_modes: list[str] = Field(default_factory=list, sa_column=Column(JSON))  # remote|hybrid|onsite
+    locations: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    roles: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    skills: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    seniority: str = ""
+    min_salary: int | None = None
+    needs_sponsorship: bool = False
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Company(SQLModel, table=True):
+    """One entry in the discovery registry: an ATS board we can pull jobs from (and apply to).
+
+    `token` is the company's slug within its ATS (e.g. Greenhouse `anthropic`). Unique per
+    (ats, token) so seeding + user-adds never duplicate.
+    """
+
+    __tablename__ = "companies"
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = ""
+    ats: str = Field(index=True)              # "greenhouse" | "lever" | ...
+    token: str = Field(index=True)            # slug within the ATS
+    enabled: bool = True
+    origin: str = "seed"                      # "seed" | "user"
+    last_fetched_at: datetime | None = None
+    added_at: datetime = Field(default_factory=utcnow)
+
+
 class Job(SQLModel, table=True):
     __tablename__ = "jobs"
 

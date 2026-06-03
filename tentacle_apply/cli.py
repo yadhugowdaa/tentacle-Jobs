@@ -4,6 +4,9 @@
     uv run python -m tentacle_apply.cli ping                          # verify the LLM provider works
     uv run python -m tentacle_apply.cli intake <resume> [--email ..]  # resume -> structured profile
     uv run python -m tentacle_apply.cli sources [--query ..] [--location ..] [--limit N]  # fetch jobs
+    uv run python -m tentacle_apply.cli preferences [--email ..] [--work-modes ..] [--locations ..] [--roles ..] [--skills ..]
+    uv run python -m tentacle_apply.cli companies [add <name|url> | list | seed]   # manage discovery registry
+    uv run python -m tentacle_apply.cli discover [--email ..] [--limit N]           # preferences -> fresh ranked jobs
     uv run python -m tentacle_apply.cli match [--email ..] [--top N] [--min SCORE]  # rank jobs vs profile
     uv run python -m tentacle_apply.cli tailor [--email ..] [--job-id N] [--target T] [--max-iters K]
     uv run python -m tentacle_apply.cli apply [--email ..] [--job-id N] [--url URL] [--submit|--hitl] [--headful]
@@ -139,6 +142,138 @@ def match(args: list[str]) -> None:
     for r in ranked:
         fit = "[green]✓[/green]" if r.eligible else "[red]✗[/red]"
         table.add_row(f"{r.score:.0f}", fit, r.job.company, r.job.title[:46], r.job.location[:22])
+    console.print(table)
+
+
+def _resolve_user_or_exit(session, email):
+    from sqlmodel import select
+
+    from tentacle_apply.db.models import User
+
+    user = (
+        session.exec(select(User).where(User.email == email.lower())).first()
+        if email
+        else session.exec(select(User)).first()
+    )
+    if user is None:
+        console.print("[red]No user. Run `intake` on a resume first.[/red]")
+        sys.exit(1)
+    return user
+
+
+def preferences(args: list[str]) -> None:
+    from tentacle_apply.db.session import get_session, init_db
+    from tentacle_apply.discovery import preferences as prefs_mod
+
+    email = _opt(args, "--email") or None
+    init_db()
+    with get_session() as session:
+        user = _resolve_user_or_exit(session, email)
+
+        setters = {}
+        if "--work-modes" in args:
+            setters["work_modes"] = _opt(args, "--work-modes")
+        if "--locations" in args:
+            setters["locations"] = _opt(args, "--locations")
+        if "--roles" in args:
+            setters["roles"] = _opt(args, "--roles")
+        if "--skills" in args:
+            setters["skills"] = _opt(args, "--skills")
+        if "--seniority" in args:
+            setters["seniority"] = _opt(args, "--seniority")
+        if "--min-salary" in args:
+            setters["min_salary"] = int(_opt(args, "--min-salary", "0") or 0)
+        if "--needs-sponsorship" in args:
+            setters["needs_sponsorship"] = True
+
+        if setters:
+            prefs = prefs_mod.upsert_preferences(session, user.id, **setters)
+            console.print("[green]Preferences saved.[/green]")
+        else:
+            prefs = prefs_mod.get_preferences(session, user.id)
+            if prefs is None:
+                console.print("[yellow]No preferences set yet.[/yellow] Use --work-modes/--locations/--roles/--skills/…")
+                return
+
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column(style="cyan", justify="right")
+        table.add_column()
+        table.add_row("work modes", ", ".join(prefs.work_modes) or "—")
+        table.add_row("locations", ", ".join(prefs.locations) or "—")
+        table.add_row("roles", ", ".join(prefs.roles) or "—")
+        table.add_row("skills", ", ".join(prefs.skills[:15]) or "—")
+        table.add_row("seniority", prefs.seniority or "—")
+        table.add_row("min salary", str(prefs.min_salary) if prefs.min_salary else "—")
+        table.add_row("needs sponsorship", "yes" if prefs.needs_sponsorship else "no")
+        console.print(table)
+
+
+def companies(args: list[str]) -> None:
+    from tentacle_apply.db.session import get_session, init_db
+    from tentacle_apply.discovery import registry
+
+    action = args[0] if args else "list"
+    init_db()
+    with get_session() as session:
+        if action == "add":
+            raw = args[1] if len(args) > 1 else ""
+            if not raw:
+                console.print("[red]Usage:[/red] companies add <company-name-or-careers-url>")
+                sys.exit(2)
+            console.print(f"[dim]Resolving[/dim] {raw!r} …")
+            company = registry.add_company(session, raw)
+            if company is None:
+                console.print(f"[yellow]Could not find {raw!r} on supported ATS {registry.SUPPORTED_ATS}.[/yellow]")
+                sys.exit(1)
+            console.print(f"[green]Added[/green] {company.name} → [cyan]{company.ats}/{company.token}[/cyan]")
+            return
+        if action == "seed":
+            added = registry.seed_registry(session)
+            console.print(f"[green]Seeded[/green] {added} new companies.")
+        # list (default)
+        rows = registry.list_companies(session)
+        if not rows:
+            console.print("[yellow]Registry empty.[/yellow] Run `companies seed` or `companies add <name>`.")
+            return
+        table = Table(title=f"Company registry ({len(rows)})")
+        table.add_column("name", style="cyan")
+        table.add_column("ats", style="magenta")
+        table.add_column("token")
+        table.add_column("origin", style="dim")
+        table.add_column("on", justify="center")
+        for c in rows:
+            table.add_row(c.name, c.ats, c.token, c.origin, "✓" if c.enabled else "✗")
+        console.print(table)
+
+
+def discover(args: list[str]) -> None:
+    from tentacle_apply.discovery import run_discovery
+
+    email = _opt(args, "--email") or None
+    limit = int(_opt(args, "--limit", "20") or 20)
+
+    console.print("[dim]Discovering jobs (free, no LLM) — aggregators + company registry …[/dim]")
+    report = run_discovery(user_email=email, limit=limit)
+    console.print(
+        f"[green]Fetched {report.fetched}[/green] from {report.companies_queried} companies + aggregators · "
+        f"kept after filter (added [cyan]{report.added}[/cyan], dup {report.skipped_dup}) · "
+        f"filtered out {report.filtered_out}"
+    )
+    for name, err in report.errors.items():
+        console.print(f"[yellow]source '{name}' failed:[/yellow] {err}")
+
+    if not report.ranked:
+        console.print("[yellow]No ranked matches. Add companies (`companies add`) or set preferences.[/yellow]")
+        return
+    table = Table(title=f"Top {len(report.ranked)} matches")
+    table.add_column("score", style="green", justify="right")
+    table.add_column("fit", justify="center")
+    table.add_column("company", style="cyan")
+    table.add_column("title")
+    table.add_column("location", style="dim")
+    for r in report.ranked:
+        fit = "[green]✓[/green]" if r.eligible else "[red]✗[/red]"
+        table.add_row(f"{r.score:.0f}", fit, r.job.company, r.job.title[:44], r.job.location[:22])
     console.print(table)
 
 
@@ -394,6 +529,12 @@ def main() -> None:
         intake(sys.argv[2:])
     elif cmd == "sources":
         sources(sys.argv[2:])
+    elif cmd == "preferences":
+        preferences(sys.argv[2:])
+    elif cmd == "companies":
+        companies(sys.argv[2:])
+    elif cmd == "discover":
+        discover(sys.argv[2:])
     elif cmd == "match":
         match(sys.argv[2:])
     elif cmd == "tailor":
@@ -405,7 +546,8 @@ def main() -> None:
     else:
         console.print(
             f"[red]Unknown command:[/red] {cmd}. "
-            "Use 'init-db', 'ping', 'intake', 'sources', 'match', 'tailor', 'apply' or 'serve'."
+            "Use 'init-db', 'ping', 'intake', 'sources', 'preferences', 'companies', 'discover', "
+            "'match', 'tailor', 'apply' or 'serve'."
         )
         sys.exit(2)
 
