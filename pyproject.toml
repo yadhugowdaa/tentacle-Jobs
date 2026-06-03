@@ -1,0 +1,57 @@
+[project]
+name = "tentacle-apply"
+version = "0.0.1"
+description = "Octopodia 🐙 / tentacle-apply: a reliability-first, autonomous job-application co-pilot."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Typed config from environment / .env.
+    "pydantic-settings>=2.5",
+    "python-dotenv>=1.0",
+    # Typed ORM (SQLAlchemy + Pydantic). SQLite now, trivial swap to Postgres later.
+    "sqlmodel>=0.0.22",
+    # Readable CLI output.
+    "rich>=13.7",
+    # Retry-with-backoff around LLM calls.
+    "tenacity>=9.0",
+    # LLM providers (free tiers): NVIDIA NIM pool + Gemini, behind one provider layer.
+    "langchain-core>=0.3",
+    "langchain-nvidia-ai-endpoints>=1.4.0",
+    "langchain-google-genai>=4.2.4",
+    # Resume parsing: PDF text extraction + DOCX.
+    "pymupdf>=1.24",
+    "python-docx>=1.1",
+    # HTTP client for job-source APIs.
+    "requests>=2.32",
+    # Local embeddings for job<->profile matching (runs on CPU, free).
+    "fastembed>=0.3",
+    "numpy>=1.26",
+    "playwright>=1.60.0",
+    "fastapi>=0.136.3",
+    "uvicorn[standard]>=0.48.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+# Pragmatic set: pyflakes (F), pycodestyle (E/W), isort (I), bugbear (B), pyupgrade (UP).
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = [
+    "E501",   # line length is handled by the formatter, not enforced hard
+    "B008",   # FastAPI-style default calls in signatures
+]

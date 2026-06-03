@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>tentacle-apply · dashboard</title>
+<style>
+  :root {
+    --bg: #06070a;
+    --panel: rgba(255, 255, 255, 0.025);
+    --panel-strong: rgba(255, 255, 255, 0.04);
+    --line: rgba(255, 255, 255, 0.08);
+    --line-soft: rgba(255, 255, 255, 0.05);
+    --fg: #e9eaf0;
+    --muted: #8b8fa3;
+    --faint: #5b5f72;
+    --accent: #7c8cff;
+    --accent-2: #c084fc;
+    --green: #34d399;
+    --blue: #60a5fa;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --gray: #9ca3af;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  /* ambient aurora */
+  .aurora { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+  .aurora span {
+    position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.5;
+    animation: drift 22s ease-in-out infinite;
+  }
+  .aurora .a1 { width: 560px; height: 560px; top: -180px; left: -120px; background: radial-gradient(circle, rgba(124,140,255,0.45), transparent 65%); }
+  .aurora .a2 { width: 620px; height: 620px; top: -160px; right: -180px; background: radial-gradient(circle, rgba(192,132,252,0.35), transparent 65%); animation-delay: -7s; }
+  .aurora .a3 { width: 520px; height: 520px; bottom: -260px; left: 30%; background: radial-gradient(circle, rgba(52,211,153,0.18), transparent 65%); animation-delay: -14s; }
+  @keyframes drift { 0%,100% { transform: translate(0,0) scale(1);} 50% { transform: translate(40px,30px) scale(1.08);} }
+  body::after {
+    content: ""; position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .wrap { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; padding: 0 24px 80px; }
+
+  header {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 0; margin-bottom: 14px;
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .brand { display: flex; align-items: center; gap: 11px; font-weight: 600; letter-spacing: -0.02em; font-size: 16px; }
+  .brand .logo { font-size: 20px; filter: grayscale(0.15); }
+  .brand .dim { color: var(--faint); font-weight: 400; }
+  .controls { display: flex; align-items: center; gap: 12px; }
+  select, button {
+    background: var(--panel-strong); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px 12px; font-size: 13px; font-family: inherit; cursor: pointer;
+    transition: border-color .2s, background .2s;
+  }
+  select:hover, button:hover { border-color: rgba(255,255,255,0.2); }
+  .live { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 0 rgba(52,211,153,0.6); animation: pulse 2.4s infinite; }
+  .dot.off { background: var(--red); animation: none; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52,211,153,0.5);} 70% { box-shadow: 0 0 0 7px rgba(52,211,153,0);} 100% { box-shadow: 0 0 0 0 rgba(52,211,153,0);} }
+
+  h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.03em; margin: 22px 0 4px; }
+  h1 .grad { background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 26px; }
+
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px;
+    transition: transform .25s, border-color .25s;
+  }
+  .card:hover { transform: translateY(-2px); border-color: rgba(255,255,255,0.16); }
+  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; }
+  .card .num { font-size: 32px; font-weight: 650; letter-spacing: -0.03em; margin-top: 8px; }
+  .card .num.green { color: var(--green); }
+  .card .num.amber { color: var(--amber); }
+  .card .num.red { color: var(--red); }
+
+  .progress-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; margin-bottom: 26px; }
+  .progress-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+  .progress-head .t { font-size: 13px; color: var(--muted); }
+  .progress-head .v { font-size: 13px; color: var(--fg); }
+  .bar { height: 9px; border-radius: 999px; background: rgba(255,255,255,0.06); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); width: 0%; transition: width .6s cubic-bezier(.2,.8,.2,1); }
+
+  .table-card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+  .table-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--line-soft); }
+  .table-head .title { font-weight: 600; font-size: 15px; }
+  .table-head .count { color: var(--faint); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; color: var(--faint); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 12px 20px; }
+  td { padding: 14px 20px; border-top: 1px solid var(--line-soft); vertical-align: middle; }
+  tbody tr { transition: background .15s; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .role { font-weight: 550; color: var(--fg); }
+  .co { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .loc { color: var(--faint); font-size: 12.5px; }
+  a.link { color: var(--accent); text-decoration: none; font-size: 12.5px; }
+  a.link:hover { text-decoration: underline; }
+
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; border: 1px solid transparent; white-space: nowrap; }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .b-verified, .b-submitted { color: var(--green); background: rgba(52,211,153,0.1); border-color: rgba(52,211,153,0.25); }
+  .b-queued, .b-applying, .b-tailoring { color: var(--blue); background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.25); }
+  .b-skipped_captcha { color: var(--amber); background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.25); }
+  .b-failed { color: var(--red); background: rgba(248,113,113,0.1); border-color: rgba(248,113,113,0.25); }
+  .b-duplicate { color: var(--gray); background: rgba(156,163,175,0.1); border-color: rgba(156,163,175,0.25); }
+
+  .empty { padding: 60px 20px; text-align: center; color: var(--faint); }
+  .empty .big { font-size: 40px; margin-bottom: 12px; opacity: 0.7; }
+  code { background: rgba(255,255,255,0.06); padding: 2px 7px; border-radius: 6px; font-size: 12px; color: var(--muted); }
+  .foot { margin-top: 30px; text-align: center; color: var(--faint); font-size: 12px; }
+
+  @media (max-width: 820px) { .cards { grid-template-columns: repeat(2,1fr); } .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+  <div class="aurora"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
+  <div class="wrap">
+    <header>
+      <div class="brand"><span class="logo">🐙</span> tentacle-apply <span class="dim">/ dashboard</span></div>
+      <div class="controls">
+        <span class="live"><span class="dot" id="dot"></span><span id="liveText">connecting…</span></span>
+        <select id="userSel" title="user"></select>
+        <button id="refreshBtn">↻ Refresh</button>
+      </div>
+    </header>
+
+    <h1>Application <span class="grad">tracker</span></h1>
+    <div class="sub">Every prepared and submitted application — grounded, verified, de-duplicated.</div>
+
+    <div class="cards">
+      <div class="card"><div class="label">Prepared</div><div class="num" id="cPrepared">–</div></div>
+      <div class="card"><div class="label">Submitted</div><div class="num green" id="cSubmitted">–</div></div>
+      <div class="card"><div class="label">CAPTCHA / handoff</div><div class="num amber" id="cSkipped">–</div></div>
+      <div class="card"><div class="label">Failed</div><div class="num red" id="cFailed">–</div></div>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-head"><span class="t">Target progress</span><span class="v" id="pText">0 / 0</span></div>
+      <div class="bar"><i id="pBar"></i></div>
+    </div>
+
+    <div class="table-card">
+      <div class="table-head"><span class="title">Applications</span><span class="count" id="tCount"></span></div>
+      <div id="tableBody"></div>
+    </div>
+
+    <div class="foot">Octopodia 🐙 · tentacle-apply — reliability-first job-application co-pilot</div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let currentEmail = null;
+
+  const STATUS_LABEL = {
+    queued: "prepared", applying: "applying", tailoring: "tailoring",
+    submitted: "submitted", verified: "verified", failed: "failed",
+    skipped_captcha: "captcha handoff", duplicate: "duplicate",
+  };
+
+  function badge(status) {
+    const label = STATUS_LABEL[status] || status;
+    return `<span class="badge b-${status}">${label}</span>`;
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " +
+           d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  }
+
+  async function loadUsers() {
+    try {
+      const r = await fetch("/api/users");
+      const users = await r.json();
+      const sel = $("userSel");
+      sel.innerHTML = "";
+      if (!users.length) { sel.innerHTML = "<option>no users</option>"; return; }
+      users.forEach((u) => {
+        const o = document.createElement("option");
+        o.value = u.email; o.textContent = u.email; sel.appendChild(o);
+      });
+      currentEmail = users[0].email;
+    } catch (e) { /* handled by health */ }
+  }
+
+  async function loadData() {
+    if (!currentEmail) return;
+    const q = "?email=" + encodeURIComponent(currentEmail);
+    try {
+      const [sR, aR] = await Promise.all([fetch("/api/stats" + q), fetch("/api/applications" + q)]);
+      const s = await sR.json();
+      const a = await aR.json();
+      renderStats(s);
+      renderTable(a.applications || []);
+      setLive(true);
+    } catch (e) { setLive(false); }
+  }
+
+  function setLive(ok) {
+    $("dot").className = "dot" + (ok ? "" : " off");
+    $("liveText").textContent = ok ? "live" : "offline";
+  }
+
+  function renderStats(s) {
+    if (s.error) return;
+    $("cPrepared").textContent = s.prepared ?? 0;
+    $("cSubmitted").textContent = s.submitted ?? 0;
+    $("cSkipped").textContent = s.skipped_captcha ?? 0;
+    $("cFailed").textContent = s.failed ?? 0;
+    const done = s.submitted ?? 0, target = s.target || 0;
+    const pct = target > 0 ? Math.min(100, Math.round((done / target) * 100)) : 0;
+    $("pText").textContent = `${done} / ${target || "—"}`;
+    $("pBar").style.width = pct + "%";
+  }
+
+  function renderTable(apps) {
+    $("tCount").textContent = apps.length ? `${apps.length} total` : "";
+    if (!apps.length) {
+      $("tableBody").innerHTML = `<div class="empty"><div class="big">🐙</div>No applications yet.<br>Run <code>cli apply</code> to prepare one.</div>`;
+      return;
+    }
+    const rows = apps.map((x) => {
+      const link = x.confirmation_url
+        ? `<a class="link" href="${x.confirmation_url}" target="_blank">confirmation ↗</a>`
+        : (x.job_url ? `<a class="link" href="${x.job_url}" target="_blank">posting ↗</a>` : "—");
+      return `<tr>
+        <td><div class="role">${esc(x.title) || "—"}</div><div class="co">${esc(x.company)}</div></td>
+        <td class="loc hide-sm">${esc(x.location) || "—"}</td>
+        <td>${badge(x.status)}</td>
+        <td class="hide-sm">${link}</td>
+        <td class="loc hide-sm">${x.attempts || 0}</td>
+        <td class="loc">${fmtDate(x.created_at)}</td>
+      </tr>`;
+    }).join("");
+    $("tableBody").innerHTML = `<table>
+      <thead><tr><th>Role</th><th class="hide-sm">Location</th><th>Status</th>
+      <th class="hide-sm">Link</th><th class="hide-sm">Tries</th><th>Created</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  }
+
+  function esc(s) { return (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+  $("userSel").addEventListener("change", (e) => { currentEmail = e.target.value; loadData(); });
+  $("refreshBtn").addEventListener("click", loadData);
+
+  (async () => {
+    await loadUsers();
+    await loadData();
+    setInterval(loadData, 5000);
+  })();
+</script>
+</body>
+</html>

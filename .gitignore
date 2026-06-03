@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+
+# Project data (local DB, resumes, traces, generated files)
+data/
+!data/.gitkeep
+
+# Node / Next.js (frontend, later)
+web/node_modules/
+web/.next/
+web/out/
+
+# OS / editor
+.DS_Store
+Thumbs.db
