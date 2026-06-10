@@ -11,6 +11,17 @@ from tentacle_apply.sources.base import FetchedJob, http_get_json, matches_query
 API = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs"
 
 
+def ats_type_for_url(url: str) -> str:
+    """Only Greenhouse-hosted forms (`*.greenhouse.io`) are Tier-1 applyable.
+
+    Many companies use Greenhouse as a backend but render a fully custom front-end on their own
+    domain (e.g. stripe.com, databricks.com). Those can't be driven by our deterministic template,
+    so we tag them `greenhouse_external` — the run loop will skip them instead of wasting tailoring
+    budget on a form it can't fill.
+    """
+    return "greenhouse" if "greenhouse.io" in (url or "").lower() else "greenhouse_external"
+
+
 def fetch_company(token: str, query: str = "", location: str = "", limit: int = 20) -> list[FetchedJob]:
     data = http_get_json(API.format(token=token), {"content": "true"})
     out: list[FetchedJob] = []
@@ -22,6 +33,7 @@ def fetch_company(token: str, query: str = "", location: str = "", limit: int = 
             continue
         if location and not matches_query(location, loc):
             continue
+        url = j.get("absolute_url", "")
         out.append(
             FetchedJob(
                 source="greenhouse",
@@ -29,8 +41,8 @@ def fetch_company(token: str, query: str = "", location: str = "", limit: int = 
                 company=token,
                 title=title,
                 location=loc,
-                url=j.get("absolute_url", ""),
-                ats_type="greenhouse",
+                url=url,
+                ats_type=ats_type_for_url(url),
                 description=desc,
                 posted_at=parse_dt(j.get("updated_at")),
             )

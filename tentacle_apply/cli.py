@@ -5,19 +5,20 @@
     uv run python -m tentacle_apply.cli intake <resume> [--email ..]  # resume -> structured profile
     uv run python -m tentacle_apply.cli sources [--query ..] [--location ..] [--limit N]  # fetch jobs
     uv run python -m tentacle_apply.cli preferences [--email ..] [--work-modes ..] [--locations ..] [--roles ..] [--skills ..]
-    uv run python -m tentacle_apply.cli companies [add <name|url> | list | seed]   # manage discovery registry
+    uv run python -m tentacle_apply.cli companies [add <name|careers-url> | list | seed]  # add resolves ANY careers URL → ATS (Tier-0 detect)
     uv run python -m tentacle_apply.cli discover [--email ..] [--limit N]           # preferences -> fresh ranked jobs
     uv run python -m tentacle_apply.cli match [--email ..] [--top N] [--min SCORE]  # rank jobs vs profile
     uv run python -m tentacle_apply.cli tailor [--email ..] [--job-id N] [--target T] [--max-iters K]
-    uv run python -m tentacle_apply.cli apply [--email ..] [--job-id N] [--url URL] [--submit|--hitl] [--headful]
+    uv run python -m tentacle_apply.cli apply [--email ..] [--job-id N] [--url URL] [--ats greenhouse|lever|ashby|workable|smartrecruiters|workday] [--submit|--hitl] [--headful]
         #   (no flag) dry run · --submit auto-submit (skips CAPTCHA) · --hitl auto-fill + you solve any CAPTCHA
+    uv run python -m tentacle_apply.cli run [--email ..] [--target N] [--mode prepare|submit|hitl] [--min-score S] [--no-discover] [--headful]
+        #   autonomous loop: discover -> rank -> quality-gate -> tailor -> apply -> record, until target. Resumable.
     uv run python -m tentacle_apply.cli serve [--host ..] [--port N]  # dashboard + JSON API
 """
 
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
@@ -348,52 +349,18 @@ def tailor(args: list[str]) -> None:
     console.print(result.cover_letter[:600])
 
 
-def _extract_phone(text: str) -> str:
-    import re
-
-    m = re.search(r"(\+?\d[\d\s().\-]{7,}\d)", text or "")
-    return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
-
-
-def _extract_links(text: str) -> dict[str, str]:
-    import re
-
-    links: dict[str, str] = {}
-    for kind, pat in (
-        ("linkedin", r"(?:https?://)?(?:www\.)?linkedin\.com/[\w\-/]+"),
-        ("github", r"(?:https?://)?(?:www\.)?github\.com/[\w\-/]+"),
-    ):
-        m = re.search(pat, text or "", re.I)
-        if m:
-            links[kind] = m.group(0)
-    return links
-
-
-def _resume_pdf_for(profile, job_id: int) -> Path | None:
-    from tentacle_apply.config import DATA_DIR
-    from tentacle_apply.tailor.render import markdown_to_pdf
-
-    tailored_md = DATA_DIR / "tailored" / f"job{job_id}_resume.md"
-    if tailored_md.exists():
-        return markdown_to_pdf(tailored_md.read_text(encoding="utf-8"), DATA_DIR / "tailored" / f"job{job_id}_resume.pdf")
-    if profile and profile.resume_path and Path(profile.resume_path).suffix.lower() == ".pdf" and Path(profile.resume_path).exists():
-        return Path(profile.resume_path)
-    if profile and profile.raw_text:
-        return markdown_to_pdf(profile.raw_text, DATA_DIR / "tailored" / f"profile_{profile.user_id}_resume.pdf")
-    return None
-
-
 def apply(args: list[str]) -> None:
     from sqlmodel import select
 
-    from tentacle_apply.apply import GreenhouseApplier, find_duplicate
-    from tentacle_apply.apply.base import Applicant, split_name
+    from tentacle_apply.apply import find_duplicate, get_applier, supported_ats
+    from tentacle_apply.apply.assets import build_applicant
     from tentacle_apply.db.models import Application, ApplicationStatus, Job, Profile, User
     from tentacle_apply.db.session import get_session, init_db
 
     email = _opt(args, "--email") or None
     job_id_arg = _opt(args, "--job-id")
     url_override = _opt(args, "--url")
+    ats_override = _opt(args, "--ats") or None
     interactive = "--hitl" in args
     do_submit = "--submit" in args or interactive
     headful = "--headful" in args or interactive
@@ -412,17 +379,18 @@ def apply(args: list[str]) -> None:
 
         job = session.get(Job, int(job_id_arg)) if job_id_arg else None
         if job is None and not url_override:
-            top_gh = session.exec(
-                select(Job).where(Job.ats_type == "greenhouse").order_by(Job.id.desc())
+            job = session.exec(
+                select(Job).where(Job.ats_type.in_(supported_ats())).order_by(Job.id.desc())
             ).first()
-            job = top_gh
         if job is None and not url_override:
-            console.print("[red]No Greenhouse job found. Pass --job-id or --url, or run `sources`.[/red]")
+            console.print(f"[red]No applyable job found (supported: {', '.join(supported_ats())}). Pass --job-id or --url.[/red]")
             sys.exit(1)
 
         target_url = url_override or (job.url if job else "")
-        if job and job.ats_type and job.ats_type != "greenhouse":
-            console.print(f"[yellow]job ats_type={job.ats_type!r} is not greenhouse — Step 6 supports Greenhouse only.[/yellow]")
+        ats = ats_override or (job.ats_type if job else "greenhouse")
+        applier = get_applier(ats, headful=headful)
+        if applier is None:
+            console.print(f"[yellow]No Tier-1 applier for ats={ats!r}. Supported: {', '.join(supported_ats())}.[/yellow]")
             sys.exit(2)
 
         # Reliability guard: never apply twice.
@@ -432,28 +400,7 @@ def apply(args: list[str]) -> None:
                 console.print(f"[yellow]Duplicate:[/yellow] already {dup.status} for this role (application #{dup.id}). Skipping.")
                 sys.exit(0)
 
-        first, last = split_name(profile.full_name if profile else "")
-        job_id_for_assets = job.id if job else 0
-        resume_pdf = _resume_pdf_for(profile, job_id_for_assets)
-        cover_path = (
-            Path(__file__).resolve().parent.parent / "data" / "tailored" / f"job{job_id_for_assets}_cover.txt"
-        )
-        cover = cover_path.read_text(encoding="utf-8") if cover_path.exists() else ""
-
-        applicant = Applicant(
-            first_name=first,
-            last_name=last,
-            email=user.email,
-            phone=_extract_phone(profile.raw_text if profile else ""),
-            location=(profile.locations[0] if profile and profile.locations else ""),
-            work_auth=(profile.work_auth if profile else ""),
-            min_salary=(profile.min_salary if profile else None),
-            years_exp=(profile.years_exp if profile else 0.0),
-            resume_pdf=resume_pdf,
-            resume_text=(profile.raw_text if profile else ""),
-            cover_letter=cover,
-            links=_extract_links(profile.raw_text if profile else ""),
-        )
+        applicant = build_applicant(user, profile, job)
         job_text = f"{job.title} at {job.company}\n{job.description}" if job else ""
         job_db_id = job.id if job else None
 
@@ -471,9 +418,8 @@ def apply(args: list[str]) -> None:
     if applicant.resume_pdf:
         console.print(f"[dim]resume:[/dim] {applicant.resume_pdf}")
 
-    result = GreenhouseApplier(headful=headful).apply(
-        target_url, applicant, job_text, submit=do_submit, interactive=interactive
-    )
+    console.print(f"[dim]ats:[/dim] {ats}")
+    result = applier.apply(target_url, applicant, job_text, submit=do_submit, interactive=interactive)
 
     color = "green" if result.ok else ("yellow" if result.status in (ApplicationStatus.SKIPPED_CAPTCHA, ApplicationStatus.DUPLICATE) else "red")
     console.print(f"[{color}]status={result.status}[/{color}]  filled={', '.join(result.filled) or '-'}")
@@ -510,6 +456,54 @@ def apply(args: list[str]) -> None:
             console.print(f"[dim]recorded application (job_id={job_db_id}, status={result.status}).[/dim]")
 
 
+def run(args: list[str]) -> None:
+    email = _opt(args, "--email") or None
+    target = int(_opt(args, "--target", str(settings.default_target_applications)) or settings.default_target_applications)
+    mode = _opt(args, "--mode", settings.run_mode) or settings.run_mode
+    min_score_arg = _opt(args, "--min-score")
+    discover = "--no-discover" not in args
+    headful = "--headful" in args or mode == "hitl"
+
+    if mode not in ("prepare", "submit", "hitl"):
+        console.print(f"[red]--mode must be prepare|submit|hitl (got {mode!r}).[/red]")
+        sys.exit(2)
+    if not settings.llm_key:
+        console.print(f"[red]No API key for provider '{settings.llm_provider}'. Set it in .env.[/red]")
+        sys.exit(1)
+
+    from tentacle_apply.orchestrator import run_apply_loop
+
+    label = {"prepare": "PREPARE (fill + screenshot, no submit)", "submit": "AUTO-SUBMIT (skips CAPTCHA)", "hitl": "HITL (you solve CAPTCHA)"}[mode]
+    console.print(f"[bold]Run[/bold] target=[cyan]{target}[/cyan] mode=[magenta]{label}[/magenta] discover={discover}")
+    result = run_apply_loop(
+        user_email=email,
+        target=target,
+        mode=mode,
+        min_score=float(min_score_arg) if min_score_arg else None,
+        discover=discover,
+        headful=headful,
+    )
+
+    console.print(
+        f"[green]Run #{result.run_id} {result.stopped_reason}[/green] — "
+        f"prepared [bold]{result.prepared}[/bold]/{result.target} · submitted {result.submitted} · "
+        f"gated_out {result.gated_out} · duplicates {result.duplicates} · "
+        f"skipped_captcha {result.skipped_captcha} · failed {result.failed} · unsupported {result.unsupported}"
+    )
+    if not result.outcomes:
+        console.print("[yellow]No candidates. Set preferences, add companies, or lower --min-score.[/yellow]")
+        return
+    table = Table(title="Run outcomes")
+    table.add_column("score", style="green", justify="right")
+    table.add_column("status")
+    table.add_column("company", style="cyan")
+    table.add_column("title")
+    table.add_column("reason", style="dim")
+    for o in result.outcomes[:40]:
+        table.add_row(f"{o.score:.0f}", o.status, o.company[:18], o.title[:38], o.reason[:40])
+    console.print(table)
+
+
 def serve(args: list[str]) -> None:
     import uvicorn
 
@@ -541,13 +535,15 @@ def main() -> None:
         tailor(sys.argv[2:])
     elif cmd == "apply":
         apply(sys.argv[2:])
+    elif cmd == "run":
+        run(sys.argv[2:])
     elif cmd == "serve":
         serve(sys.argv[2:])
     else:
         console.print(
             f"[red]Unknown command:[/red] {cmd}. "
             "Use 'init-db', 'ping', 'intake', 'sources', 'preferences', 'companies', 'discover', "
-            "'match', 'tailor', 'apply' or 'serve'."
+            "'match', 'tailor', 'apply', 'run' or 'serve'."
         )
         sys.exit(2)
 

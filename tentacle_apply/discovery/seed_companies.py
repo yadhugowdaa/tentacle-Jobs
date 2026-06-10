@@ -43,4 +43,28 @@ SEED_COMPANIES: list[tuple[str, str, str]] = [
     ("lever", "netlify", "Netlify"),
     ("lever", "spotify", "Spotify"),
     ("lever", "plaid", "Plaid"),
+    # --- Ashby --- (invalid/changed tokens are harmless; the fetcher skips empty boards)
+    ("ashby", "ashby", "Ashby"),
+    ("ashby", "linear", "Linear"),
+    ("ashby", "ramp", "Ramp"),
+    ("ashby", "vanta", "Vanta"),
+    ("ashby", "posthog", "PostHog"),
+    ("ashby", "hex", "Hex"),
+    ("ashby", "supabase", "Supabase"),
+    ("ashby", "notion", "Notion"),
+    ("ashby", "1password", "1Password"),
+    # --- Workable --- (token = the apply.workable.com/{token} slug)
+    ("workable", "careers", "Workable"),
+    # --- SmartRecruiters --- (token = the company identifier in the Posting API)
+    ("smartrecruiters", "Visa", "Visa"),
+    ("smartrecruiters", "Square", "Square"),
+    ("smartrecruiters", "BoschGroup", "Bosch"),
+    ("smartrecruiters", "Wayfair", "Wayfair"),
+    # --- Workday --- (token = "{host}/{site}"; discovery only — apply is account-gated, see apply/workday.py)
+    ("workday", "nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite", "NVIDIA"),
+    ("workday", "salesforce.wd12.myworkdayjobs.com/External_Career_Site", "Salesforce"),
+    ("workday", "adobe.wd5.myworkdayjobs.com/external_experienced", "Adobe"),
+    ("workday", "cisco.wd5.myworkdayjobs.com/Cisco_Careers", "Cisco"),
+    ("workday", "mastercard.wd1.myworkdayjobs.com/CorporateCareers", "Mastercard"),
+    ("workday", "redhat.wd5.myworkdayjobs.com/Jobs", "Red Hat"),
 ]

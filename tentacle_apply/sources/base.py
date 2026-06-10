@@ -12,13 +12,44 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import requests
+from requests.adapters import HTTPAdapter
 from sqlmodel import select
+from urllib3.util.retry import Retry
 
 from tentacle_apply.db.models import Job
 from tentacle_apply.db.session import get_session, init_db
 
 USER_AGENT = "tentacle-apply/0.1 (+https://github.com/octopodia)"
 TIMEOUT = 20
+
+
+def _build_session() -> requests.Session:
+    """A shared HTTP session with automatic retry/backoff + connection pooling.
+
+    Free public ATS APIs occasionally return transient 429/5xx or drop a connection; without retries a
+    single blip silently loses a whole board's jobs. We retry idempotent GET/POST a few times with
+    exponential backoff (honoring Retry-After) so discovery is resilient, not lossy.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=0.6,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "POST"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=16, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"User-Agent": USER_AGENT})
+    return session
+
+
+# Importable everywhere we make HTTP calls (sources + registry probes) so retries are uniform.
+SESSION = _build_session()
 
 
 @dataclass
@@ -35,10 +66,10 @@ class FetchedJob:
 
 
 def http_get_json(url: str, params: dict | None = None):
-    resp = requests.get(
+    resp = SESSION.get(
         url,
         params=params,
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        headers={"Accept": "application/json"},
         timeout=TIMEOUT,
     )
     resp.raise_for_status()

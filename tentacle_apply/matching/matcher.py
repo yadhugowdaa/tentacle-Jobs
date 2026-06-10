@@ -7,11 +7,13 @@ LLM judgment can be layered on later for borderline cases; embeddings keep this 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
 from sqlmodel import select
 
+from tentacle_apply.config import settings
 from tentacle_apply.db.models import Job, Match, Profile, User, utcnow
 from tentacle_apply.db.session import get_session, init_db
 from tentacle_apply.log import get_logger
@@ -20,6 +22,31 @@ from tentacle_apply.matching.embedder import embed
 log = get_logger(__name__)
 
 _REMOTE_HINTS = ("remote", "worldwide", "anywhere", "global")
+
+# Common English function words: their density cleanly separates English text (~0.15–0.35) from other
+# languages (~<0.05). Free, dependency-free language signal — good enough to catch e.g. German posts.
+_EN_COMMON = frozenset(
+    "the a an and or of to in for with on at as is are be will we you your our this that "
+    "from by it they have has not can".split()
+)
+
+
+def _english_ratio(text: str) -> float:
+    toks = re.findall(r"[a-z]+", (text or "").lower())
+    if not toks:
+        return 0.0
+    return sum(1 for t in toks if t in _EN_COMMON) / len(toks)
+
+
+def _language_penalty(profile_text: str, job_text: str) -> float:
+    """0<penalty<=1. Penalize a posting whose language doesn't match the resume's (English resume vs
+    a clearly non-English posting). Symmetric-ish: if the resume itself isn't English, don't penalize.
+    """
+    if settings.lang_mismatch_penalty >= 1.0:
+        return 1.0
+    profile_en = _english_ratio(profile_text) >= 0.10
+    job_non_en = _english_ratio(job_text) < 0.09
+    return settings.lang_mismatch_penalty if (profile_en and job_non_en) else 1.0
 
 
 @dataclass
@@ -98,15 +125,19 @@ def rank_jobs(
             return []
 
         log.info("ranking %d jobs for user_id=%s", len(jobs), user.id)
+        profile_text = _profile_text(profile)
         job_texts = [_job_text(j) for j in jobs]
-        vectors = embed([_profile_text(profile)] + job_texts)
+        vectors = embed([profile_text] + job_texts)
         sims = _cosine(vectors[0], vectors[1:])
 
         results: list[RankedJob] = []
         for job, text, sim in zip(jobs, job_texts, sims, strict=False):
             overlap = _skill_overlap(profile.skills, text.lower())
-            score = round(100.0 * (0.7 * float(sim) + 0.3 * overlap), 1)
+            penalty = _language_penalty(profile_text, text)
+            score = round(100.0 * (0.7 * float(sim) + 0.3 * overlap) * penalty, 1)
             eligible, reason = _eligible(profile.locations, job.location)
+            if penalty < 1.0 and not reason:
+                reason = "posting language differs from resume (down-ranked)"
             results.append(RankedJob(job=job, score=score, eligible=eligible, reason=reason))
 
         # Upsert Match rows.

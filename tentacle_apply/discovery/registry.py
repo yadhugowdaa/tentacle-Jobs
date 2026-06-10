@@ -14,14 +14,14 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
-import requests
 from sqlmodel import Session, select
 
 from tentacle_apply.db.models import Company, utcnow
+from tentacle_apply.discovery import detect
 from tentacle_apply.discovery.seed_companies import SEED_COMPANIES
 from tentacle_apply.log import get_logger
-from tentacle_apply.sources import greenhouse, lever
-from tentacle_apply.sources.base import USER_AGENT, FetchedJob
+from tentacle_apply.sources import ashby, greenhouse, lever, smartrecruiters, workable, workday
+from tentacle_apply.sources.base import SESSION, FetchedJob
 
 log = get_logger(__name__)
 
@@ -29,12 +29,71 @@ log = get_logger(__name__)
 ATS_FETCH = {
     "greenhouse": greenhouse.fetch_company,
     "lever": lever.fetch_company,
+    "ashby": ashby.fetch_company,
+    "workable": workable.fetch_company,
+    "smartrecruiters": smartrecruiters.fetch_company,
+    "workday": workday.fetch_company,
 }
 
-# ats -> a probe URL template used to verify a guessed token exists.
+# ats -> a probe URL template used to verify a guessed token exists (simple GET + truthy JSON).
 _PROBE_URL = {
     "greenhouse": "https://boards-api.greenhouse.io/v1/boards/{token}/jobs",
     "lever": "https://api.lever.co/v0/postings/{token}?mode=json",
+    "ashby": "https://api.ashbyhq.com/posting-api/job-board/{token}",
+}
+
+
+def _workable_token_exists(token: str) -> bool:
+    """Workable's board list is a POST, so it needs a custom probe (GET won't do)."""
+    try:
+        resp = SESSION.post(
+            workable.LIST_API.format(token=token),
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            json={},
+            timeout=15,
+        )
+        return resp.status_code == 200 and bool(resp.json().get("results"))
+    except Exception:  # noqa: BLE001 - a failed probe just means "not this ATS"
+        return False
+
+
+def _smartrecruiters_token_exists(token: str) -> bool:
+    """SmartRecruiters answers 200 even for unknown companies, so require a real posting."""
+    try:
+        resp = SESSION.get(
+            smartrecruiters.LIST_API.format(token=token),
+            params={"limit": 1},
+            headers={"Accept": "application/json"},
+            timeout=15,
+        )
+        return resp.status_code == 200 and bool(resp.json().get("content"))
+    except Exception:  # noqa: BLE001 - a failed probe just means "not this ATS"
+        return False
+
+
+def _workday_token_exists(token: str) -> bool:
+    """Workday tokens are "{host}/{site}"; verify by POSTing the tenant's CXS jobs endpoint."""
+    parsed = workday.parse_token(token)
+    if parsed is None:
+        return False
+    host, tenant, site = parsed
+    try:
+        resp = SESSION.post(
+            f"{workday.cxs_base(host, tenant, site)}/jobs",
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            json={"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
+            timeout=15,
+        )
+        return resp.status_code == 200 and bool(resp.json().get("jobPostings"))
+    except Exception:  # noqa: BLE001 - a failed probe just means "not this ATS"
+        return False
+
+
+# ats -> custom callable(token) -> bool, for boards the generic GET probe can't verify.
+_PROBE_FN = {
+    "workable": _workable_token_exists,
+    "smartrecruiters": _smartrecruiters_token_exists,
+    "workday": _workday_token_exists,
 }
 
 # Patterns that pull (ats, token) straight out of a careers/board URL.
@@ -56,6 +115,22 @@ def _slugify_variants(name: str) -> list[str]:
     return list(dict.fromkeys(v for v in (compact, hyphen) if v))
 
 
+def _looks_like_url(raw: str) -> bool:
+    """A pasted careers page (vs. a bare company name): has a scheme or a `domain.tld` shape."""
+    return bool(re.match(r"^https?://", raw, re.I)) or bool(re.search(r"\.[a-z]{2,}(?:/|$|\?)", raw, re.I))
+
+
+def _domain_label(raw: str) -> str:
+    """Registrable label from a URL/host (careers.acme.com -> 'acme'); falls back to `raw`."""
+    host = re.sub(r"^https?://", "", raw.strip(), flags=re.I).split("/")[0].split("?")[0].split(":")[0]
+    parts = [p for p in host.split(".") if p]
+    while parts and parts[0].lower() in {"www", "careers", "career", "jobs", "job", "apply", "boards", "work", "join", "hire", "hiring"}:
+        parts.pop(0)
+    if len(parts) >= 2:
+        return parts[-2]
+    return parts[0] if parts else raw
+
+
 def parse_company_url(raw: str) -> tuple[str, str] | None:
     """If `raw` is a recognizable ATS board URL, return (ats, token); else None."""
     for ats, pat in _URL_PATTERNS:
@@ -68,9 +143,15 @@ def parse_company_url(raw: str) -> tuple[str, str] | None:
 
 
 def _token_exists(ats: str, token: str) -> bool:
-    url = _PROBE_URL[ats].format(token=token)
+    custom = _PROBE_FN.get(ats)
+    if custom is not None:
+        return custom(token)
+    template = _PROBE_URL.get(ats)
+    if template is None:
+        return False
+    url = template.format(token=token)
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=15)
+        resp = SESSION.get(url, headers={"Accept": "application/json"}, timeout=15)
         if resp.status_code != 200:
             return False
         data = resp.json()
@@ -80,22 +161,58 @@ def _token_exists(ats: str, token: str) -> bool:
         return False
 
 
-def resolve_company(raw: str) -> tuple[str, str, str] | None:
-    """Resolve a name or careers URL to (ats, token, display_name), or None if not found.
+def _verified(ats: str, token: str) -> bool:
+    return ats in ATS_FETCH and _token_exists(ats, token)
 
-    Order: (1) parse a board URL directly; (2) probe supported ATS APIs with slug guesses.
+
+def _display_for(ats: str, token: str) -> str:
+    """A human-friendly name from a token. Workday tokens are "{host}/{site}" → use the tenant."""
+    if ats == "workday":
+        return token.split("/")[0].split(".")[0].replace("-", " ").title()
+    return token
+
+
+def resolve_company(raw: str) -> tuple[str, str, str] | None:
+    """Resolve a name or *any* careers URL to (ats, token, display_name), or None if not found.
+
+    Order (cheapest first):
+      1. Board token straight out of the pasted string (board URL or obvious ATS embed host).
+      2. **Tier-0 detect**: if it's a URL, fetch the page and fingerprint the embedded ATS.
+      3. Slug-guess across supported ATS — by the URL's domain label, else the bare name.
     """
     raw = raw.strip()
     if not raw:
         return None
 
-    parsed = parse_company_url(raw)
+    # 1) Token visible in the string itself (e.g. jobs.lever.co/acme, ...greenhouse.io/embed?for=acme).
+    #    If it's clearly a known ATS board URL, a failed verify means "dead board" — stop here rather
+    #    than fall through to domain-label guessing (which would extract the ATS host, not a company).
+    parsed = parse_company_url(raw) or detect.detect_in_text(raw)
     if parsed:
         ats, token = parsed
-        if ats in ATS_FETCH and _token_exists(ats, token):
-            return ats, token, token
+        if _verified(ats, token):
+            return ats, token, _display_for(ats, token)
         return None
 
+    if _looks_like_url(raw):
+        # 2) Fetch the careers page and fingerprint the ATS it's wired to.
+        detected = detect.detect_ats(raw)
+        if detected:
+            ats, token = detected
+            if _verified(ats, token):
+                log.info("resolved %r -> %s/%s via Tier-0 detect", raw, ats, token)
+                return ats, token, _domain_label(raw)
+        # 3a) No embed found — try the domain label as a slug on each ATS.
+        label = _domain_label(raw)
+        for token in _slugify_variants(label):
+            for ats in SUPPORTED_ATS:
+                if _token_exists(ats, token):
+                    log.info("resolved %r -> %s/%s via domain-label guess", raw, ats, token)
+                    return ats, token, label
+        log.info("could not resolve careers URL %r on supported ATS %s", raw, SUPPORTED_ATS)
+        return None
+
+    # 3b) Plain company name → slug-guess across supported ATS.
     name = raw
     for token in _slugify_variants(name):
         for ats in SUPPORTED_ATS:

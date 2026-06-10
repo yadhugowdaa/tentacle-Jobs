@@ -6,6 +6,7 @@ local embeddings. LLM spend happens later, only when the user chooses to tailor 
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from sqlmodel import select
@@ -82,15 +83,23 @@ def run_discovery(
                 report.errors[name] = str(exc)[:160]
                 log.warning("aggregator %s failed: %s", name, str(exc)[:160])
 
-        # 2) Registry ATS boards (freshest; also our apply targets).
+        # 2) Registry ATS boards (freshest; also our apply targets). Fetched concurrently — these are
+        #    independent network calls, and serial fetching of dozens of boards (some with per-posting
+        #    detail calls) is the dominant latency. Workers only do HTTP + set an attribute; the
+        #    session is touched (add/commit) only here on the main thread.
         companies = registry.list_companies(session, enabled_only=True)
         report.companies_queried = len(companies)
-        for company in companies:
-            raw.extend(
-                registry.fetch_company_jobs(company, query=query, location=location, limit=per_company_limit)
-            )
-            session.add(company)  # persist last_fetched_at
-        session.commit()
+        if companies:
+            def _fetch(company):
+                return company, registry.fetch_company_jobs(
+                    company, query=query, location=location, limit=per_company_limit
+                )
+
+            with ThreadPoolExecutor(max_workers=min(12, len(companies))) as pool:
+                for company, jobs in pool.map(_fetch, companies):
+                    raw.extend(jobs)
+                    session.add(company)  # persist last_fetched_at
+            session.commit()
 
         report.fetched = len(raw)
 

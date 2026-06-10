@@ -140,6 +140,15 @@ class Application(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class RunStatus:
+    """Lifecycle of one autonomous batch run."""
+
+    RUNNING = "running"
+    COMPLETED = "completed"   # reached target or exhausted the candidate pool cleanly
+    STOPPED = "stopped"       # asked to stop / cancelled
+    FAILED = "failed"         # aborted on an unexpected error
+
+
 class Run(SQLModel, table=True):
     __tablename__ = "runs"
 
@@ -147,5 +156,7 @@ class Run(SQLModel, table=True):
     user_id: int = Field(foreign_key="users.id", index=True)
     target_count: int = 20
     applied_count: int = 0
+    mode: str = "prepare"                       # prepare | submit | hitl
+    status: str = Field(default=RunStatus.RUNNING, index=True)
     started_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
