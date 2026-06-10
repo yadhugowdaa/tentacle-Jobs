@@ -9,7 +9,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tentacle_apply.log import get_logger
-from tentacle_apply.sources import adzuna, arbeitnow, greenhouse, lever, remotive
+from tentacle_apply.sources import (
+    adzuna,
+    arbeitnow,
+    ashby,
+    greenhouse,
+    lever,
+    remotive,
+    smartrecruiters,
+    workable,
+    workday,
+)
 from tentacle_apply.sources.base import FetchedJob, store_jobs
 
 log = get_logger(__name__)
@@ -24,6 +34,10 @@ _KEYWORD_SOURCES = {
 _BOARD_SOURCES = {
     "greenhouse": greenhouse.fetch,
     "lever": lever.fetch,
+    "ashby": ashby.fetch,
+    "workable": workable.fetch,
+    "smartrecruiters": smartrecruiters.fetch,
+    "workday": workday.fetch,
 }
 
 

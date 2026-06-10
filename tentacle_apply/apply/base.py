@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from sqlmodel import Session, select
 
@@ -53,6 +54,26 @@ class ApplyResult:
         return self.status in (ApplicationStatus.VERIFIED, ApplicationStatus.SUBMITTED) or (
             self.status == ApplicationStatus.QUEUED and not self.error
         )
+
+
+@runtime_checkable
+class Applier(Protocol):
+    """Contract every Tier-1 ATS template satisfies (Greenhouse, Lever, Ashby, …).
+
+    Structural (Protocol) so existing appliers conform without inheriting. The run loop resolves an
+    applier by `job.ats_type` and calls `apply(...)` uniformly.
+    """
+
+    ats: str
+
+    def apply(
+        self,
+        url: str,
+        applicant: Applicant,
+        job_text: str = "",
+        submit: bool = False,
+        interactive: bool = False,
+    ) -> ApplyResult: ...
 
 
 def split_name(full_name: str) -> tuple[str, str]:

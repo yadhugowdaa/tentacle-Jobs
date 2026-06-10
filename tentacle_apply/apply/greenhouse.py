@@ -109,6 +109,22 @@ class GreenhouseApplier:
                 self._ensure_form(page)
                 page.wait_for_timeout(800)
 
+                # Backstop: if there's no real Greenhouse form here (company-hosted custom front-end,
+                # expired posting, redirect), do NOT report a false success. Fail honestly.
+                if not self._form_present(page):
+                    notes.append("no Greenhouse application form found (likely a company-hosted front-end)")
+                    shot = screenshot_path(None, "noform")
+                    try:
+                        page.screenshot(path=str(shot), full_page=True)
+                    except Exception:  # noqa: BLE001
+                        shot = ""
+                    return ApplyResult(
+                        status=ApplicationStatus.FAILED,
+                        error="no application form found at URL",
+                        notes=notes,
+                        screenshot=str(shot),
+                    )
+
                 self._fill_standard(page, applicant, filled, notes)
                 self._upload_resume(page, applicant, filled, notes)
                 self._answer_questions(page, applicant, job_text, filled, notes, fill_freetext)
@@ -233,6 +249,19 @@ class GreenhouseApplier:
                     return
             except Exception:  # noqa: BLE001
                 continue
+
+    def _form_present(self, page) -> bool:
+        """True if the page exposes the standard Greenhouse applicant fields we can actually fill."""
+        try:
+            return (
+                page.locator(
+                    '#first_name, input[name="first_name"], input[autocomplete="given-name"], '
+                    '#email, input[type="email"]'
+                ).count()
+                > 0
+            )
+        except Exception:  # noqa: BLE001
+            return False
 
     def _detect_captcha(self, page) -> bool:
         for sel in (

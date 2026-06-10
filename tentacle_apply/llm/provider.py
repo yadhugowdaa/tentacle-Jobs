@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import itertools
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.rate_limiters import InMemoryRateLimiter
@@ -39,15 +41,34 @@ def _nvidia_endpoints() -> list[NvidiaEndpoint]:
     return [NvidiaEndpoint(key=settings.nvidia_api_key, model=settings.nvidia_model)]
 
 
-def _build_nvidia(ep: NvidiaEndpoint, temperature: float = 0.2) -> BaseChatModel:
+def _build_nvidia(
+    ep: NvidiaEndpoint, temperature: float = 0.2, reasoning_budget: int | None = None
+) -> BaseChatModel:
     from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
-    extra = {}
+    extra: dict = {}
     if "deepseek" in ep.model:  # only deepseek accepts the thinking-disable flag
         extra["model_kwargs"] = {"extra_body": {"chat_template_kwargs": {"thinking": False}}}
+    elif reasoning_budget is not None:
+        # Nemotron-style thinking control: cap (or disable) the reasoning budget so a strong model
+        # stays usable on the free tier. We keep only the final answer, not the reasoning trace.
+        body: dict = {"chat_template_kwargs": {"enable_thinking": reasoning_budget > 0}}
+        if reasoning_budget > 0:
+            body["reasoning_budget"] = reasoning_budget
+        extra["model_kwargs"] = {"extra_body": body}
     return ChatNVIDIA(
         model=ep.model, api_key=ep.key, temperature=temperature, rate_limiter=_RATE_LIMITER, **extra
     )
+
+
+def _strong_endpoint() -> NvidiaEndpoint | None:
+    """The configured strong reasoning model on an available NVIDIA key, or None if unavailable."""
+    if settings.llm_provider != "nvidia" or not settings.strong_model:
+        return None
+    key = settings.nvidia_api_key or (settings.nvidia_pool[0].key if settings.nvidia_pool else "")
+    if not key:
+        return None
+    return NvidiaEndpoint(key=key, model=settings.strong_model)
 
 
 def _build_gemini(temperature: float = 0.2) -> BaseChatModel:
@@ -125,8 +146,39 @@ def _invoke_stable(payload, temperature: float = 0.2) -> str:
     return llm.invoke(payload).content
 
 
-def complete(prompt: str, stable: bool = False, temperature: float = 0.2) -> str:
-    """Provider-agnostic single-prompt completion (see module/llm __init__ for the modes)."""
+@retry(
+    retry=retry_if_exception(_is_rate_limit),
+    wait=wait_exponential(multiplier=4, min=4, max=60),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def _invoke_strong(payload, temperature: float = 0.2) -> str:
+    """Invoke the configured strong reasoning model (Nemotron). Raises if unavailable/failing so the
+    caller can fall back to the fast pool — a strong answer is nice-to-have, never a blocker."""
+    ep = _strong_endpoint()
+    if ep is None:
+        raise RuntimeError("strong model not configured/available")
+    llm = _build_nvidia(ep, temperature, reasoning_budget=settings.strong_reasoning_budget)
+    return llm.invoke(payload).content
+
+
+def complete(prompt: str, stable: bool = False, strong: bool = False, temperature: float = 0.2) -> str:
+    """Provider-agnostic single-prompt completion (see module/llm __init__ for the modes).
+
+    `strong=True` routes to the configured reasoning model for hard, hallucination-sensitive prompts,
+    transparently falling back to the fast pool on any error so it never blocks an apply.
+    """
+    if strong and _strong_endpoint() is not None:
+        try:
+            # Wall-clock guard: a queued/slow strong endpoint must never hang an apply.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_invoke_strong, prompt, temperature).result(
+                    timeout=settings.strong_timeout_s
+                )
+        except FuturesTimeout:
+            log.warning("strong model timed out after %ss — falling back to fast pool", settings.strong_timeout_s)
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully to the fast pool
+            log.warning("strong model failed (%s) — falling back to fast pool", str(exc)[:120])
     if stable:
         return _invoke_stable(prompt, temperature)
     return _invoke(prompt, temperature)

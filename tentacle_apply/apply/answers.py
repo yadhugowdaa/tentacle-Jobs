@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 from tentacle_apply.apply.base import Applicant
+from tentacle_apply.config import settings
 from tentacle_apply.llm import complete
 
 # EEO / demographic questions: always decline by default (privacy + non-discrimination).
@@ -126,6 +127,8 @@ def _llm_free_text(label: str, applicant: Applicant, job_text: str) -> str:
         resume=(applicant.resume_text or applicant.cover_letter or "")[:2200],
     )
     try:
-        return complete(prompt, temperature=0.5).strip()
+        # The one genuinely "reasoning" + hallucination-sensitive step → use the strong model when
+        # configured (it has the best non-hallucination score in its class); falls back to fast pool.
+        return complete(prompt, strong=settings.use_strong_for_answers, temperature=0.5).strip()
     except Exception:  # noqa: BLE001 - never block an apply on an optional free-text answer
         return ""
